@@ -3457,7 +3457,6 @@ checksum = "450b41d98bc7d554b97852761912eb0ccc0148d20b1c3a8d8adee1eb8a8c4661"
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
 [UPDATING] c v1.0.0 -> v1.0.1
-[REMOVING] shared v0.2.0
 [NOTE] pass `--verbose` to see 1 unchanged dependencies behind latest
 
 "#]])
@@ -3476,7 +3475,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6815d5ddba1afab27e9a3e223d294b5165ca1c488635d7782d9fa067c9b69ddc"
 dependencies = [
- "shared",
+ "shared 0.2.0",
 ]
 
 [[package]]
@@ -3493,7 +3492,7 @@ name = "foo"
 version = "0.1.0"
 dependencies = [
  "c",
- "shared",
+ "shared 0.1.0",
 ]
 
 [[package]]
@@ -3501,6 +3500,12 @@ name = "shared"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7229fd816f437ce23e3433bc64e3be727f45cb213facb4eaf6888b8814dfd472"
+
+[[package]]
+name = "shared"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "450b41d98bc7d554b97852761912eb0ccc0148d20b1c3a8d8adee1eb8a8c4661"
 
 "##]],
     );

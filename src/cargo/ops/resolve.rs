@@ -597,7 +597,7 @@ fn register_previous_locks(
     ws: &Workspace<'_>,
     registry: &mut PackageRegistry<'_>,
     resolve: &Resolve,
-    keep: Keep<'_>,
+    keep_previous: Keep<'_>,
     dev_deps: bool,
 ) {
     let path_pkg = |id: SourceId| {
@@ -636,7 +636,7 @@ fn register_previous_locks(
     // in (as we didn't accidentally lock it to an old version).
     let mut avoid_locking = HashSet::new();
     for node in resolve.iter() {
-        if !keep(&node) {
+        if !keep_previous(&node) {
             add_deps(resolve, node, &mut avoid_locking);
         }
     }
@@ -755,17 +755,24 @@ fn register_previous_locks(
     // function let's put it to action. Take a look at the previous lock file,
     // filter everything by this callback, and then shove everything else into
     // the registry as a locked dependency.
-    let keep = |id: &PackageId| keep(id) && !avoid_locking.contains(id);
+    let keep = |id: &PackageId| keep_previous(id) && !avoid_locking.contains(id);
 
     registry.clear_lock();
     {
         let _span = tracing::span!(tracing::Level::TRACE, "register_lock").entered();
-        for node in resolve.iter().filter(keep) {
-            let deps = resolve
-                .deps_not_replaced(node)
-                .map(|p| p.0)
-                .filter(keep)
-                .collect::<Vec<_>>();
+        // Packages in the transitive update set are not locked themselves,
+        // but their previous dependency edges still guide candidate ordering.
+        for node in resolve.iter().filter(keep_previous) {
+            let lock_package = keep(&node);
+            let mut dependencies = Vec::new();
+            let mut preferred_dependencies = Vec::new();
+            for (dependency, _) in resolve.deps_not_replaced(node) {
+                if keep(&dependency) {
+                    dependencies.push(dependency);
+                } else if keep_previous(&dependency) {
+                    preferred_dependencies.push(dependency);
+                }
+            }
 
             // In the v2 lockfile format and prior the `branch=master` dependency
             // directive was serialized the same way as the no-branch-listed
@@ -778,10 +785,15 @@ fn register_previous_locks(
             // this point. All new lock files are encoded as v3-or-later, so this is
             // just compat for loading an old lock file successfully.
             if let Some(node) = master_branch_git_source(node, resolve) {
-                registry.register_lock(node, deps.clone());
+                registry.register_lock(
+                    node,
+                    lock_package,
+                    dependencies.clone(),
+                    preferred_dependencies.clone(),
+                );
             }
 
-            registry.register_lock(node, deps);
+            registry.register_lock(node, lock_package, dependencies, preferred_dependencies);
         }
     }
 

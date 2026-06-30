@@ -185,6 +185,7 @@ pub fn resolve_ws_with_opts<'gctx>(
             has_dev_units,
             resolve.as_ref(),
             None,
+            true,
             specs,
             add_patches,
         )?;
@@ -243,6 +244,7 @@ pub fn resolve_ws_with_opts<'gctx>(
             has_dev_units,
             Some(&resolve),
             None,
+            true,
             specs,
             add_patches,
         )?;
@@ -257,6 +259,7 @@ pub fn resolve_ws_with_opts<'gctx>(
             has_dev_units,
             resolve.as_ref(),
             None,
+            true,
             specs,
             add_patches,
         )?;
@@ -362,6 +365,7 @@ fn resolve_with_registry<'gctx>(
         HasDevUnits::Yes,
         prev.as_ref(),
         None,
+        true,
         &[],
         true,
     )?;
@@ -389,9 +393,11 @@ fn resolve_with_registry<'gctx>(
 /// of resolve to guide the resolution process.
 ///
 /// This also takes an optional filter `keep_previous`, which informs the `registry`
-/// which package ID should be locked to the previous instance of resolve
-/// (often used in pairings with updates). See comments in [`register_previous_locks`]
-/// for scenarios that might override this.
+/// which package ID should be preserved from the previous instance of resolve
+/// (often used in pairings with updates). If `lock_precise_sources` is `false`,
+/// previous package IDs are only used as preferences. If it is `true`, previous
+/// precise non-registry source IDs are also locked. See comments in
+/// [`register_previous_locks`] for scenarios that might override this.
 ///
 /// The previous resolve normally comes from a lock file. This function does not
 /// read or write lock files from the filesystem.
@@ -409,6 +415,7 @@ pub fn resolve_with_previous<'gctx>(
     has_dev_units: HasDevUnits,
     previous: Option<&Resolve>,
     keep_previous: Option<Keep<'_>>,
+    lock_precise_sources: bool,
     specs: &[PackageIdSpec],
     register_patches: bool,
 ) -> CargoResult<Resolve> {
@@ -472,10 +479,13 @@ pub fn resolve_with_previous<'gctx>(
     if let Some(r) = previous {
         trace!("previous: {:?}", r);
 
-        // In the case where a previous instance of resolve is available, we
-        // want to lock as many packages as possible to the previous version
-        // without disturbing the graph structure.
-        register_previous_locks(ws, registry, r, &keep, dev_deps);
+        // In the case where a previous instance of resolve is available, use it
+        // to guide the next resolve without disturbing the graph structure.
+        if lock_precise_sources {
+            register_previous_locks(ws, registry, r, &keep, dev_deps)?;
+        } else {
+            registry.clear_lock();
+        }
 
         // Prefer to use anything in the previous lock file, aka we want to have conservative updates.
         let _span = tracing::span!(tracing::Level::TRACE, "prefer_package_id").entered();
@@ -576,8 +586,8 @@ pub fn get_resolved_packages<'gctx>(
     registry.get(&ids)
 }
 
-/// In this function we're responsible for informing the `registry` of all
-/// locked dependencies from the previous lock file we had, `resolve`.
+/// In this function we're responsible for informing the `registry` of source
+/// locks from the previous lock file we had, `resolve`.
 ///
 /// This gets particularly tricky for a couple of reasons. The first is that we
 /// want all updates to be conservative, so we actually want to take the
@@ -599,7 +609,7 @@ fn register_previous_locks(
     resolve: &Resolve,
     keep_previous: Keep<'_>,
     dev_deps: bool,
-) {
+) -> CargoResult<()> {
     let path_pkg = |id: SourceId| {
         if !id.is_path() {
             return None;
@@ -751,27 +761,35 @@ fn register_previous_locks(
         }
     }
 
+    lock_registry_sources(registry, resolve, keep_previous, &avoid_locking)?;
+
     // Alright now that we've got our new, fresh, shiny, and refined `keep`
     // function let's put it to action. Take a look at the previous lock file,
-    // filter everything by this callback, and then shove everything else into
-    // the registry as a locked dependency.
+    // filter everything by this callback, and then register the source IDs that
+    // still need exact source locking.
     let keep = |id: &PackageId| keep_previous(id) && !avoid_locking.contains(id);
-
     registry.clear_lock();
     {
         let _span = tracing::span!(tracing::Level::TRACE, "register_lock").entered();
-        // Packages in the transitive update set are not locked themselves,
-        // but their previous dependency edges still guide candidate ordering.
+        // Registry package versions are preserved through `VersionPreferences`.
+        // Only precise non-registry sources need hard locking so the resolver
+        // can query the same source revision again.
         for node in resolve.iter().filter(keep_previous) {
-            let lock_package = keep(&node);
+            let lock_package = keep(&node) && needs_precise_source_lock(&node);
             let mut dependencies = Vec::new();
-            let mut preferred_dependencies = Vec::new();
-            for (dependency, _) in resolve.deps_not_replaced(node) {
-                if keep(&dependency) {
+            for (dependency, deps) in resolve.deps_not_replaced(node) {
+                if keep(&dependency)
+                    && (needs_precise_source_lock(&dependency)
+                        || deps.iter().any(|dep| {
+                            dep.matches_ignoring_source(dependency) && !dep.matches_id(dependency)
+                        })
+                        || registry.is_patch(dependency))
+                {
                     dependencies.push(dependency);
-                } else if keep_previous(&dependency) {
-                    preferred_dependencies.push(dependency);
                 }
+            }
+            if !lock_package && dependencies.is_empty() {
+                continue;
             }
 
             // In the v2 lockfile format and prior the `branch=master` dependency
@@ -785,15 +803,10 @@ fn register_previous_locks(
             // this point. All new lock files are encoded as v3-or-later, so this is
             // just compat for loading an old lock file successfully.
             if let Some(node) = master_branch_git_source(node, resolve) {
-                registry.register_lock(
-                    node,
-                    lock_package,
-                    dependencies.clone(),
-                    preferred_dependencies.clone(),
-                );
+                registry.register_lock(node, lock_package, dependencies.clone());
             }
 
-            registry.register_lock(node, lock_package, dependencies, preferred_dependencies);
+            registry.register_lock(node, lock_package, dependencies);
         }
     }
 
@@ -807,6 +820,37 @@ fn register_previous_locks(
             add_deps(resolve, dep, set);
         }
     }
+
+    fn needs_precise_source_lock(id: &PackageId) -> bool {
+        let source_id = id.source_id();
+        source_id.has_precise() && !source_id.is_registry()
+    }
+
+    Ok(())
+}
+
+fn lock_registry_sources(
+    registry: &mut PackageRegistry<'_>,
+    resolve: &Resolve,
+    keep_previous: Keep<'_>,
+    avoid_locking: &HashSet<PackageId>,
+) -> CargoResult<()> {
+    let unlocked_sources = avoid_locking
+        .iter()
+        .map(|id| id.source_id())
+        .filter(|source_id| source_id.is_registry())
+        .collect::<HashSet<_>>();
+    let sources = resolve
+        .iter()
+        .chain(resolve.unused_patches().iter().copied())
+        .filter(keep_previous)
+        .filter(|id| !avoid_locking.contains(id))
+        .map(|id| id.source_id())
+        .filter(|source_id| source_id.is_registry())
+        .filter(|source_id| !unlocked_sources.contains(source_id))
+        .map(|source_id| source_id.with_locked_precise())
+        .collect::<HashSet<_>>();
+    registry.add_sources(sources)
 }
 
 fn master_branch_git_source(id: PackageId, resolve: &Resolve) -> Option<PackageId> {

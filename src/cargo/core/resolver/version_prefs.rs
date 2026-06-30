@@ -90,6 +90,17 @@ impl VersionPreferences {
                 .unwrap_or(false)
     }
 
+    /// Returns preferred package IDs that satisfy `dep`.
+    pub fn preferred_package_ids<'a>(
+        &'a self,
+        dep: &'a Dependency,
+    ) -> impl Iterator<Item = PackageId> + 'a {
+        self.try_to_use
+            .iter()
+            .copied()
+            .filter(|pkg_id| dep.matches_id(*pkg_id))
+    }
+
     /// Sort (and filter) the given vector of summaries in-place
     ///
     /// Note: all summaries presumed to be for the same package.

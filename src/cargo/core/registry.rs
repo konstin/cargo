@@ -146,13 +146,10 @@ type LockedMap = HashMap<
 
 struct LockedPackage {
     id: PackageId,
-    // If true, lock the package itself, if false, only use the previous
-    // dependency edges as preferences.
+    // If false, the package is not locked but its dependency edges can still be.
     lock_package: bool,
     // Dependencies that are fully locked.
     deps: Vec<PackageId>,
-    // Dependencies whose previous versions should be tried first.
-    preferred_deps: Vec<PackageId>,
 }
 
 /// Kinds of sources a [`PackageRegistry`] has loaded.
@@ -295,19 +292,10 @@ impl<'gctx> PackageRegistry<'gctx> {
 
     /// Registers one "locked package" to the registry, for guiding the
     /// dependency resolution. See [`LockedMap`] for more.
-    pub fn register_lock(
-        &mut self,
-        id: PackageId,
-        lock_package: bool,
-        deps: Vec<PackageId>,
-        preferred_deps: Vec<PackageId>,
-    ) {
+    pub fn register_lock(&mut self, id: PackageId, lock_package: bool, deps: Vec<PackageId>) {
         trace!("register_lock: {} (lock package: {lock_package})", id);
         for dep in deps.iter() {
             trace!("\t-> {}", dep);
-        }
-        for dep in preferred_deps.iter() {
-            trace!("\t~> {}", dep);
         }
         let sub_vec = self
             .locked
@@ -317,8 +305,14 @@ impl<'gctx> PackageRegistry<'gctx> {
             id,
             lock_package,
             deps,
-            preferred_deps,
         });
+    }
+
+    /// Returns whether `id` is one of the resolved packages from a `[patch]` entry.
+    pub fn is_patch(&self, id: PackageId) -> bool {
+        self.patches_available
+            .values()
+            .any(|available| available.contains(&id))
     }
 
     /// Insert a `[patch]` section into this registry.
@@ -905,19 +899,6 @@ fn lock(
                 } else {
                     dep.lock_version(locked.version());
                 }
-                return dep;
-            }
-
-            // This dependency previously resolved to a package that was
-            // intentionally left unlocked. Prefer the previously locked
-            // version to avoid churn, but do not lock the version.
-            if let Some(&preferred) = locked_package
-                .preferred_deps
-                .iter()
-                .find(|&&id| dependency_matches_previous_id(&dep, id, patches))
-            {
-                trace!("\tpreferring previously unlocked dependency {}", preferred);
-                dep.prefer_package_id(preferred);
                 return dep;
             }
         }

@@ -780,6 +780,7 @@ fn build_lock(
         HasDevUnits::Yes,
         orig_resolve.as_ref(),
         None,
+        true,
         &[],
         true,
     )?;

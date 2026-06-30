@@ -192,20 +192,46 @@ impl<'a, T: Registry> RegistryQueryerAsync<'a, T> {
             }
         }
 
+        let missing_preferred = self
+            .version_prefs
+            .preferred_package_ids(dep)
+            .filter(|pkg_id| pkg_id.source_id().is_registry())
+            .filter(|pkg_id| {
+                !summaries
+                    .iter()
+                    .any(|summary| summary.package_id() == *pkg_id)
+            })
+            .collect::<Vec<_>>();
+        for pkg_id in missing_preferred {
+            let mut locked_dep = dep.clone();
+            locked_dep.lock_to(pkg_id);
+            self.registry
+                .query(&locked_dep, QueryKind::Exact, &mut |s| match s {
+                    IndexSummary::Candidate(summary) => {
+                        if !summaries
+                            .iter()
+                            .any(|existing| existing.package_id() == summary.package_id())
+                        {
+                            summaries.push(summary);
+                        }
+                    }
+                    IndexSummary::Yanked(summary)
+                        if self.version_prefs.should_prefer(&summary.package_id()) =>
+                    {
+                        if !summaries
+                            .iter()
+                            .any(|existing| existing.package_id() == summary.package_id())
+                        {
+                            summaries.push(summary);
+                        }
+                    }
+                    _ => {}
+                })
+                .await?;
+        }
+
         self.version_prefs
             .sort_summaries(&mut summaries, *first_version);
-        // Explicit first-version modes take precedence over lockfile guidance.
-        if first_version.is_none() {
-            // Put a preference, if any, in first place.
-            if let Some(preferred) = dep.preferred_package_id() {
-                if let Some(index) = summaries
-                    .iter()
-                    .position(|summary| summary.package_id() == preferred)
-                {
-                    summaries[..=index].rotate_right(1);
-                }
-            }
-        }
         Ok(Rc::new(summaries))
     }
 }

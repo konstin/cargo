@@ -47,6 +47,7 @@ pub fn generate_lockfile(ws: &Workspace<'_>) -> CargoResult<()> {
         HasDevUnits::Yes,
         previous_resolve,
         None,
+        true,
         &[],
         true,
     )?;
@@ -87,6 +88,7 @@ pub fn update_lockfile(ws: &Workspace<'_>, opts: &UpdateOptions<'_>) -> CargoRes
                         HasDevUnits::Yes,
                         None,
                         None,
+                        true,
                         &[],
                         true,
                     )?
@@ -177,6 +179,7 @@ pub fn update_lockfile(ws: &Workspace<'_>, opts: &UpdateOptions<'_>) -> CargoRes
         HasDevUnits::Yes,
         Some(&previous_resolve),
         Some(&keep),
+        false,
         &[],
         true,
     )?;

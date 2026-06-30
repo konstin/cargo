@@ -104,15 +104,8 @@ fn transitive_minor_update() {
     Package::new("log", "0.1.1").publish();
     Package::new("serde", "0.1.1").dep("log", "0.1.1").publish();
 
-    // Note that `serde` isn't actually updated here! The default behavior for
-    // `update` right now is to as conservatively as possible attempt to satisfy
-    // an update. In this case we previously locked the dependency graph to `log
-    // 0.1.0`, but nothing on the command line says we're allowed to update
-    // that. As a result the update of `serde` here shouldn't update to `serde
-    // 0.1.1` as that would also force an update to `log 0.1.1`.
-    //
-    // Also note that this is probably counterintuitive and weird. We may wish
-    // to change this one day.
+    // The old `log` is only a preference, but it is still enough to make the
+    // resolver keep the old `serde` that remains compatible with it.
     p.cargo("update serde")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
@@ -172,6 +165,113 @@ fn conservative() {
 [LOCKING] 1 package to latest compatible version
 [UPDATING] serde v0.1.0 -> v0.1.1
 [NOTE] pass `--verbose` to see 1 unchanged dependencies behind latest
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn update_preferences_allow_unrelated_package_update_for_links() {
+    Package::new("native-sys", "1.0.0")
+        .links("native")
+        .publish();
+    Package::new("foo", "1.0.0")
+        .dep("native-sys", "=1.0.0")
+        .publish();
+    Package::new("bar", "1.0.0")
+        .dep("native-sys", "=1.0.0")
+        .publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "root"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                foo = "1"
+                bar = "1"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("generate-lockfile").run();
+
+    Package::new("native-sys", "2.0.0")
+        .links("native")
+        .publish();
+    Package::new("foo", "1.1.0")
+        .dep("native-sys", "=2.0.0")
+        .publish();
+    Package::new("bar", "1.1.0")
+        .dep("native-sys", "=2.0.0")
+        .publish();
+
+    p.cargo("update -p foo --precise 1.1.0")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[UPDATING] bar v1.0.0 -> v1.1.0
+[UPDATING] foo v1.0.0 -> v1.1.0
+[UPDATING] native-sys v1.0.0 -> v2.0.0
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn update_preferences_allow_unrelated_transitive_update_for_links() {
+    Package::new("native-sys", "1.0.0")
+        .links("native")
+        .publish();
+    Package::new("foo", "1.0.0")
+        .dep("native-sys", "=1.0.0")
+        .publish();
+    Package::new("adapter", "1.0.0")
+        .dep("native-sys", "=1.0.0")
+        .publish();
+    Package::new("bar", "1.0.0").dep("adapter", "1").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "root"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                foo = "1"
+                bar = "1"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("generate-lockfile").run();
+
+    Package::new("native-sys", "2.0.0")
+        .links("native")
+        .publish();
+    Package::new("foo", "1.1.0")
+        .dep("native-sys", "=2.0.0")
+        .publish();
+    Package::new("adapter", "1.1.0")
+        .dep("native-sys", "=2.0.0")
+        .publish();
+
+    p.cargo("update -p foo --precise 1.1.0")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[UPDATING] adapter v1.0.0 -> v1.1.0
+[UPDATING] foo v1.0.0 -> v1.1.0
+[UPDATING] native-sys v1.0.0 -> v2.0.0
 
 "#]])
         .run();
@@ -1104,10 +1204,10 @@ rustdns.workspace = true
 
 "#]])
         .run();
-    // Modify a file manually, shouldn't trigger a recompile
+    // Modify a file manually so the git dependency has a newer revision.
     git_project.change_file("src/lib.rs", r#"pub fn bar() { println!("hello!"); }"#);
-    // Commit the changes and make sure we don't trigger a recompile because the
-    // lock file says not to change
+    // Commit the changes so preference-only update can move the git dependency
+    // along with the workspace member updates.
     let repo = git2::Repository::open(&git_project.root()).unwrap();
     git::add(&repo);
     git::commit(&repo);
@@ -1115,8 +1215,10 @@ rustdns.workspace = true
 
     p.cargo("update -p rootcrate")
         .with_stderr_data(str![[r#"
-[LOCKING] 2 packages to latest compatible versions
+[UPDATING] git repository `[ROOTURL]/rustdns`
+[LOCKING] 3 packages to latest compatible versions
 [UPDATING] rootcrate v2.29.8 ([ROOT]/foo/rootcrate) -> v2.29.81
+[UPDATING] rustdns v0.5.0 ([ROOTURL]/rustdns#[..]) -> #[..]
 [UPDATING] subcrate v2.29.8 ([ROOT]/foo/subcrate) -> v2.29.81
 
 "#]])
@@ -1194,10 +1296,10 @@ rustdns.workspace = true
 
 "#]])
         .run();
-    // Modify a file manually, shouldn't trigger a recompile
+    // Modify a file manually so the git dependency has a newer revision.
     git_project.change_file("src/lib.rs", r#"pub fn bar() { println!("hello!"); }"#);
-    // Commit the changes and make sure we don't trigger a recompile because the
-    // lock file says not to change
+    // Commit the changes so preference-only update can move the git dependency
+    // along with the workspace member updates.
     let repo = git2::Repository::open(&git_project.root()).unwrap();
     git::add(&repo);
     git::commit(&repo);
@@ -1205,9 +1307,11 @@ rustdns.workspace = true
 
     p.cargo("update -p crate2")
         .with_stderr_data(str![[r#"
-[LOCKING] 2 packages to latest compatible versions
+[UPDATING] git repository `[ROOTURL]/rustdns`
+[LOCKING] 3 packages to latest compatible versions
 [UPDATING] crate1 v2.29.8 ([ROOT]/foo/crate1) -> v2.29.81
 [UPDATING] crate2 v2.29.8 ([ROOT]/foo/crate2) -> v2.29.81
+[UPDATING] rustdns v0.5.0 ([ROOTURL]/rustdns#[..]) -> #[..]
 
 "#]])
         .run();
@@ -1284,10 +1388,10 @@ rustdns.workspace = true
 
 "#]])
         .run();
-    // Modify a file manually, shouldn't trigger a recompile
+    // Modify a file manually so the git dependency has a newer revision.
     git_project.change_file("src/lib.rs", r#"pub fn bar() { println!("hello!"); }"#);
-    // Commit the changes and make sure we don't trigger a recompile because the
-    // lock file says not to change
+    // Commit the changes so preference-only update can move the git dependency
+    // along with the workspace member updates.
     let repo = git2::Repository::open(&git_project.root()).unwrap();
     git::add(&repo);
     git::commit(&repo);
@@ -1295,9 +1399,11 @@ rustdns.workspace = true
 
     p.cargo("update --workspace")
         .with_stderr_data(str![[r#"
-[LOCKING] 2 packages to latest compatible versions
+[UPDATING] git repository `[ROOTURL]/rustdns`
+[LOCKING] 3 packages to latest compatible versions
 [UPDATING] crate1 v2.29.8 ([ROOT]/foo/crate1) -> v2.29.81
 [UPDATING] crate2 v2.29.8 ([ROOT]/foo/crate2) -> v2.29.81
+[UPDATING] rustdns v0.5.0 ([ROOTURL]/rustdns#[..]) -> #[..]
 
 "#]])
         .run();
